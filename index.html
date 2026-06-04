@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ROP Gadget Tool - Huy</title>
+    <style>
+        :root { --bg: #0d1117; --card: #161b22; --text: #c9d1d9; --accent: #238636; --blue: #58a6ff; }
+        body { font-family: 'Consolas', monospace; background: var(--bg); color: var(--text); padding: 15px; margin: 0; }
+        .container { max-width: 900px; margin: auto; background: var(--card); padding: 20px; border-radius: 8px; border: 1px solid #30363d; }
+        
+        .file-section { 
+            margin-bottom: 20px; 
+            padding: 15px; 
+            border: 2px dashed #30363d; 
+            border-radius: 8px;
+            text-align: center;
+        }
+        input[type="file"] { color: #8b949e; }
+
+        .search-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+        input[type="text"] { 
+            background: #0d1117; 
+            border: 1px solid #30363d; 
+            color: var(--blue); 
+            padding: 12px; 
+            border-radius: 5px; 
+            font-size: 14px; 
+            width: 100%; 
+            box-sizing: border-box; 
+        }
+
+        .actions { display: flex; flex-direction: column; gap: 10px; }
+        #status { 
+            font-size: 13px; 
+            color: #8b949e; 
+            padding: 10px; 
+            background: #1c2128; 
+            border-radius: 4px; 
+            border-left: 3px solid var(--blue); 
+        }
+        
+        button { 
+            background: var(--accent); 
+            color: white; 
+            border: none; 
+            padding: 15px; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            font-size: 16px; 
+        }
+        button:disabled { background: #234d2b; color: #666; cursor: not-allowed; }
+
+        .result-container { margin-top: 20px; }
+        .result-item { 
+            background: #000; 
+            border: 1px solid #30363d; 
+            margin-top: 8px; 
+            padding: 10px; 
+            border-radius: 4px; 
+            font-size: 13px; 
+        }
+        .line-1 { color: #8b949e; }
+        .line-2 { color: #aff5b4; font-weight: bold; }
+        .match { background: #3e3110; color: #f2cc60; padding: 0 2px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h3 style="margin-top:0">🔗 ROP Address Saver</h3>
+    
+    <div class="file-section">
+        <label style="display:block; margin-bottom:10px; color:var(--blue)">Bước 1: Chọn file Dump (.txt) từ Storage</label>
+        <input type="file" id="fileInput" accept=".txt,.asm,.lst">
+    </div>
+
+    <div class="search-grid">
+        <input type="text" id="cmd1" placeholder="Lệnh 1 (ví dụ: POP ER8)" disabled>
+        <input type="text" id="cmd2" placeholder="Lệnh 2 (ví dụ: POP PC)" disabled>
+    </div>
+
+    <div class="actions">
+        <div id="status">Chưa nạp dữ liệu. Hãy chọn file trước.</div>
+        <button id="btnSave" disabled>💾 TẢI FILE GADGETS.TXT</button>
+    </div>
+
+    <div class="result-container" id="results"></div>
+</div>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const cmd1 = document.getElementById('cmd1');
+    const cmd2 = document.getElementById('cmd2');
+    const btnSave = document.getElementById('btnSave');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    
+    let allLines = [];
+    let foundAddresses = [];
+
+    // Xử lý khi chọn file
+    fileInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        status.innerText = "Đang đọc file... vui lòng đợi.";
+        const reader = new FileReader();
+
+        reader.onload = (event) => {
+            const content = event.target.result;
+            // Tách dòng
+            allLines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+            
+            if (allLines.length > 0) {
+                status.innerText = `Đã nạp ${allLines.length.toLocaleString()} dòng. Hãy nhập lệnh để tìm.`;
+                cmd1.disabled = false;
+                cmd2.disabled = false;
+            } else {
+                status.innerText = "Lỗi: File không có nội dung.";
+            }
+        };
+
+        reader.onerror = () => { status.innerText = "Lỗi khi đọc file."; };
+        reader.readAsText(file);
+    };
+
+    // Hàm làm sạch địa chỉ theo yêu cầu của Huy (0:6F86H -> 06f86)
+    function cleanAddress(line) {
+        const match = line.match(/([0-9A-F]+):([0-9A-F]+)H/i);
+        if (match) return (match[1] + match[2]).toLowerCase();
+        
+        const matchSimple = line.match(/([0-9A-F]+)H/i);
+        if (matchSimple) return matchSimple[1].toLowerCase();
+        
+        return null;
+    }
+
+    // Hàm tìm kiếm cặp dòng liên tiếp
+    function findPairs() {
+        const v1 = cmd1.value.toUpperCase().trim();
+        const v2 = cmd2.value.toUpperCase().trim();
+        
+        results.innerHTML = '';
+        foundAddresses = [];
+        
+        if (!v1 || !v2) {
+            btnSave.disabled = true;
+            return;
+        }
+
+        let count = 0;
+        const frag = document.createDocumentFragment();
+
+        for (let i = 0; i < allLines.length - 1; i++) {
+            if (allLines[i].toUpperCase().includes(v1) && allLines[i+1].toUpperCase().includes(v2)) {
+                count++;
+                
+                // Lưu địa chỉ dòng thứ nhất (dòng chứa lệnh 1)
+                const addr = cleanAddress(allLines[i]);
+                if (addr) foundAddresses.push(addr);
+
+                // Hiển thị kết quả lên màn hình
+                const div = document.createElement('div');
+                div.className = 'result-item';
+                
+                const h1 = allLines[i].replace(new RegExp(v1, 'gi'), m => `<span class="match">${m}</span>`);
+                const h2 = allLines[i+1].replace(new RegExp(v2, 'gi'), m => `<span class="match">${m}</span>`);
+                
+                div.innerHTML = `
+                    <div class="line-1">Dòng ${i+1}: ${h1}</div>
+                    <div class="line-2">Dòng ${i+2}: ${h2}</div>
+                `;
+                frag.appendChild(div);
+
+                if (count >= 300) break; // Giới hạn hiển thị để tránh lag
+            }
+        }
+
+        results.appendChild(frag);
+        status.innerText = `Tìm thấy ${count} cặp phù hợp.`;
+        btnSave.disabled = (foundAddresses.length === 0);
+    }
+
+    // Xử lý lưu file
+    btnSave.onclick = () => {
+        if (foundAddresses.length === 0) return;
+
+        const blobContent = foundAddresses.join('\n');
+        const blob = new Blob([blobContent], { type: 'text/plain' });
+        const link = document.createElement('a');
+        
+        link.href = URL.createObjectURL(blob);
+        link.download = `found_addresses.txt`;
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        alert("Đã lưu! Kiểm tra thư mục Download/Tải về trong Storage của bạn.");
+    };
+
+    cmd1.oninput = findPairs;
+    cmd2.oninput = findPairs;
+</script>
+
+</body>
+</html>
